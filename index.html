@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🔍 C++ 代码审查 Agent</title>
+<!-- 引入 marked.js：渲染最终报告的 Markdown -->
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    background: #0f1117; color: #e1e4e8;
+    height: 100vh; display: flex; flex-direction: column;
+  }
+  .header {
+    background: #161b22; border-bottom: 1px solid #30363d;
+    padding: 14px 20px; font-size: 18px; font-weight: 600;
+  }
+  .chat {
+    flex: 1; overflow-y: auto; padding: 20px;
+    max-width: 850px; width: 100%; margin: 0 auto;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  /* 用户消息：靠右蓝色 */
+  .msg.user {
+    align-self: flex-end; background: #1f6feb; color: #fff;
+    padding: 10px 16px; border-radius: 12px; max-width: 80%;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  /* 工具调用：小标签 */
+  .msg.tool {
+    align-self: flex-start; color: #7ee787;
+    font-size: 13px; padding: 4px 0;
+  }
+  /* 工具结果：等宽字体，可折叠 */
+  .msg.obs {
+    align-self: flex-start; background: #161b22; border: 1px solid #30363d;
+    border-radius: 8px; padding: 8px 12px; max-width: 95%;
+    font-family: "SF Mono", Menlo, monospace; font-size: 12px;
+    color: #9da5b1; white-space: pre-wrap; word-break: break-all;
+    max-height: 180px; overflow-y: auto;
+  }
+  /* 最终答案：Markdown 渲染 */
+  .msg.ai {
+    align-self: flex-start; background: #21262d; border: 1px solid #30363d;
+    padding: 14px 18px; border-radius: 12px; max-width: 95%;
+    line-height: 1.6; word-break: break-word;
+  }
+  .msg.ai h1, .msg.ai h2, .msg.ai h3 { margin: 10px 0 6px; }
+  .msg.ai p { margin: 6px 0; }
+  .msg.ai pre {
+    background: #0f1117; border-radius: 6px; padding: 10px;
+    overflow-x: auto; font-size: 12px;
+  }
+  .msg.ai code {
+    font-family: "SF Mono", Menlo, monospace; font-size: 12px;
+    background: #0f1117; padding: 1px 5px; border-radius: 4px;
+  }
+  .input-area {
+    display: flex; gap: 10px; padding: 14px 20px;
+    background: #161b22; border-top: 1px solid #30363d;
+  }
+  .input-area input {
+    flex: 1; background: #21262d; border: 1px solid #30363d;
+    color: #e1e4e8; padding: 10px 14px; border-radius: 8px;
+    font-size: 15px; outline: none;
+  }
+  .input-area button {
+    background: #1f6feb; color: #fff; border: none;
+    padding: 10px 22px; border-radius: 8px; font-size: 15px; cursor: pointer;
+  }
+  .input-area button:hover { background: #388bfd; }
+  .input-area button:disabled { background: #30363d; cursor: not-allowed; }
+</style>
+</head>
+<body>
+
+<div class="header">🔍 C++ 代码审查 Agent</div>
+
+<div class="chat" id="chat"></div>
+
+<div class="input-area">
+  <input id="questionInput" placeholder="输入审查任务，如：请审查当前目录下的 C++ 项目" onkeydown="if(event.key==='Enter')send()">
+  <button id="sendBtn" onclick="send()">审查</button>
+</div>
+
+<script>
+// ===== 核心：发 POST 请求，接收 SSE 事件流，按类型渲染 =====
+async function send() {
+  const input = document.getElementById('questionInput');
+  const question = input.value.trim();
+  if (!question) return;
+  input.value = '';
+  const btn = document.getElementById('sendBtn');
+  btn.disabled = true;
+
+  // 1. 显示用户消息
+  addMessage('user', question);
+
+  // 2. POST 请求（注意：POST + JSON body，和 RAG 的 GET 不同）
+  const response = await fetch('/review', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question: question }),
+  });
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  // 3. 接收事件流
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    const parts = buffer.split('\n\n');
+    buffer = parts.pop();
+
+    for (const part of parts) {
+      if (!part.startsWith('data: ')) continue;
+      const payload = part.slice(6);
+      if (payload === '[DONE]') continue;
+
+      // 4. 解析 JSON 事件
+      let event;
+      try { event = JSON.parse(payload); } catch (e) { continue; }
+
+      // 5. 按 type 分类渲染
+      if (event.type === 'tool') {
+        // 工具调用：显示"正在调用 XXX"
+        addMessage('tool', `🔧 正在调用工具：${event.name}(${JSON.stringify(event.args)})`);
+      } else if (event.type === 'observation') {
+        // 工具结果：等宽字体显示
+        addMessage('obs', event.result);
+      } else if (event.type === 'answer') {
+        // 最终答案：Markdown 渲染
+        const aiMsg = addMessage('ai', '');
+        aiMsg.innerHTML = marked.parse(event.content);
+      }
+    }
+  }
+
+  btn.disabled = false;
+  document.getElementById('chat').scrollTop = document.getElementById('chat').scrollHeight;
+}
+
+// 辅助函数：往聊天区加一条消息
+function addMessage(cls, text) {
+  const chat = document.getElementById('chat');
+  const div = document.createElement('div');
+  div.className = `msg ${cls}`;
+  div.textContent = text;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+</script>
+</body>
+</html>

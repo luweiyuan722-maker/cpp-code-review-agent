@@ -1,0 +1,16 @@
+# 密钥（勿提交）
+.env
+
+# 虚拟环境
+.venv/
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 编译产物
+*.o
+*.out
+
+# 系统文件
+.DS_Store

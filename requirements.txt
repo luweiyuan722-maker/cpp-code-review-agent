@@ -1,0 +1,6 @@
+# doc-qa-platform/requirements.txt
+fastapi
+uvicorn
+langchain-openai
+langchain-text-splitters
+python-dotenv
