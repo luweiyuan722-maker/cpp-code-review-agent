@@ -14,29 +14,47 @@ from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from dotenv import load_dotenv
 load_dotenv()
+import jieba
+from rank_bm25 import BM25Okapi
 
-llm = ChatOpenAI(model="deepseek-chat", base_url="https://api.deepseek.com/v1", api_key=os.getenv("DEEPSEEK_API_KEY"))
+llm = ChatOpenAI(model="deepseek-chat", 
+                base_url="https://api.deepseek.com/v1",
+                api_key=os.getenv("DEEPSEEK_API_KEY"))
 
 # ===== 知识库（本地）=====
 with open("standards.md", "r") as f:
     standards_text = f.read()
 splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
 chunks = splitter.split_text(standards_text)
-embeddings = OpenAIEmbeddings(model="embedding-2", base_url="https://open.bigmodel.cn/api/paas/v4/", api_key=os.getenv("ZHIPUAI_API_KEY"))
+embeddings = OpenAIEmbeddings(model="embedding-2", 
+                              base_url="https://open.bigmodel.cn/api/paas/v4/", 
+                              api_key=os.getenv("ZHIPUAI_API_KEY"))
 CHUNK_VECTORS = embeddings.embed_documents(chunks)
+# BM25 关键词索引（jieba 中文分词）
+BM25_INDEX = BM25Okapi([list(jieba.cut(c)) for c in chunks])
 
 # ===== 本地工具（Agent 特有）=====
 @tool
 def search_knowledge_base(query: str) -> str:
-    """检索本地知识库（C++ 编码规范），返回相关规范"""
+    """检索本地知识库（C++ 编码规范），BM25 + 向量混合检索，返回相关规范"""
+    # 1. 向量检索（余弦相似度）
     qv = embeddings.embed_query(query)
-    scores = []
+    vec_scores = []
     for v in CHUNK_VECTORS:
         dot = sum(a*b for a, b in zip(qv, v))
         norm_q = sum(a*a for a in qv) ** 0.5
         norm_v = sum(b*b for b in v) ** 0.5
-        scores.append(dot / (norm_q * norm_v))
-    top_idx = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:3]
+        vec_scores.append(dot / (norm_q * norm_v))
+    # 2. BM25 关键词检索
+    bm25_scores = BM25_INDEX.get_scores(list(jieba.cut(query)))
+    # 3. 归一化 + 加权融合
+    def _normalize(x):
+        x_min, x_max = min(x), max(x)
+        if x_max - x_min < 1e-10:
+            return [0.0] * len(x)
+        return [(v - x_min) / (x_max - x_min) for v in x]
+    final = [0.5 * a + 0.5 * b for a, b in zip(_normalize(vec_scores), _normalize(bm25_scores))]
+    top_idx = sorted(range(len(final)), key=lambda i: final[i], reverse=True)[:3]
     return "\n\n".join(chunks[i] for i in top_idx)
 
 @tool

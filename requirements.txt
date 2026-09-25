@@ -1,6 +1,9 @@
-# doc-qa-platform/requirements.txt
 fastapi
 uvicorn
 langchain-openai
 langchain-text-splitters
+langchain-mcp-adapters
 python-dotenv
+duckduckgo-search
+rank-bm25
+jieba
